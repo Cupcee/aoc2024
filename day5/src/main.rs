@@ -72,137 +72,139 @@ fn problem1(input: String) {
     pretty_print_answer(sum);
 }
 
-/// Build a subgraph for just the given update and topologically sort it.
-/// Then reorder the pages accordingly.
-fn fix_update(
-    graph: &DiGraph<u32, ()>,
-    node_map: &HashMap<u32, NodeIndex>,
-    updates_line: &[u32],
-) -> Vec<u32> {
-    // Identify constrained and unconstrained nodes in this update
-    let constrained_nodes: HashSet<u32> = updates_line
-        .iter()
-        .filter(|val| node_map.contains_key(val))
-        .copied()
-        .collect();
-
-    let unconstrained_nodes: Vec<u32> = updates_line
-        .iter()
-        .filter(|val| !node_map.contains_key(val))
-        .copied()
-        .collect();
-
-    // Build a subgraph containing only the constrained nodes and the edges between them
-    // We need a mapping from the old NodeIndexes to new ones in the subgraph
-    let mut subgraph = DiGraph::<u32, ()>::new();
-    let mut subgraph_node_map = HashMap::new();
-
-    // Add nodes
-    for &val in &constrained_nodes {
-        let old_nidx = node_map[&val];
-        let new_nidx = subgraph.add_node(val);
-        subgraph_node_map.insert(old_nidx, new_nidx);
-    }
-
-    // Add edges
-    for edge in graph.edge_references() {
-        let src = edge.source();
-        let dst = edge.target();
-        if subgraph_node_map.contains_key(&src) && subgraph_node_map.contains_key(&dst) {
-            subgraph.add_edge(subgraph_node_map[&src], subgraph_node_map[&dst], ());
-        }
-    }
-
-    // Perform a toposort on the subgraph
-    let order = match toposort(&subgraph, None) {
-        Ok(order) => order,
-        Err(err) => {
-            // If we have a cycle here, we can't produce a valid order.
-            // In the context of the puzzle, this shouldn't happen if input is correct.
-            // For safety, just return the original line or handle gracefully.
-            eprintln!("No valid ordering possible for this update: {:?}", err);
-            return updates_line.to_vec();
-        }
-    };
-
-    let mut corrected_constrained: Vec<u32> = order.iter().map(|&n_idx| subgraph[n_idx]).collect();
-
-    // Append unconstrained nodes at the end (or handle differently if needed)
-    corrected_constrained.extend(unconstrained_nodes);
-
-    corrected_constrained
-}
-
 fn problem2(input: String) {
     let parts: Vec<_> = input.split("\n\n").collect();
     let (rules, updates) = (parts[0].lines(), parts[1].lines());
 
-    let mut graph = DiGraph::<u32, ()>::new();
-    let mut node_map = HashMap::new();
+    // Parse all rules into a structure that's easy to query per-update.
+    // We'll store them in a HashMap<u32, Vec<u32>> representing adjacency:
+    // For a page X, we'll keep a list of all Y such that X|Y is a rule.
+    let mut adjacency: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut pages_in_rules = HashSet::new();
 
-    // Build the global graph and map each page to its node index
     for rule in rules {
-        let indices = rule
-            .split("|")
-            .map(|s| s.parse::<u32>().unwrap())
-            .collect::<Vec<u32>>();
-        let src_id = *node_map
-            .entry(indices[0])
-            .or_insert_with(|| graph.add_node(indices[0]));
-        let dst_id = *node_map
-            .entry(indices[1])
-            .or_insert_with(|| graph.add_node(indices[1]));
-        graph.add_edge(src_id, dst_id, ());
+        let parts: Vec<_> = rule.split("|").collect();
+        let src = parts[0].parse::<u32>().unwrap();
+        let dst = parts[1].parse::<u32>().unwrap();
+        adjacency.entry(src).or_default().push(dst);
+        pages_in_rules.insert(src);
+        pages_in_rules.insert(dst);
     }
 
-    // Collect updates that are incorrectly ordered
     let mut incorrect_updates: Vec<Vec<u32>> = Vec::new();
 
     'outer: for updates_line in updates {
-        let updates_line = updates_line
+        let update_pages = updates_line
             .split(",")
             .map(|val| val.parse::<u32>().unwrap())
             .collect::<Vec<u32>>();
 
-        // Create a mapping of NodeIndex to position in the update line for constrained pages
-        let mut input_rank_map = HashMap::new();
-        for (i, &val) in updates_line.iter().enumerate() {
-            if let Some(&n_idx) = node_map.get(&val) {
-                input_rank_map.insert(n_idx, i);
-            }
+        // Check correctness:
+        // For each rule X|Y that involves pages in this update, verify order.
+        // Build a map from page -> index in update_pages for quick lookup.
+        let mut position_map = HashMap::new();
+        for (i, &page) in update_pages.iter().enumerate() {
+            position_map.insert(page, i);
         }
 
-        // Check if this line is correct:
-        // An update is correct if for every edge (src -> dst) where both pages appear,
-        // src_pos < dst_pos. If any violation is found, it's incorrect.
-        for edge in graph.edge_references() {
-            let src = edge.source();
-            let dst = edge.target();
-            if let (Some(&src_pos), Some(&dst_pos)) =
-                (input_rank_map.get(&src), input_rank_map.get(&dst))
-            {
-                if src_pos >= dst_pos {
-                    // Found a violation, so this update is incorrect.
-                    // We'll fix it by building a subgraph and toposorting it.
-                    let fixed_line = fix_update(&graph, &node_map, &updates_line);
-                    incorrect_updates.push(fixed_line);
-                    continue 'outer; // Move on to the next update after fixing this one.
+        let mut is_correct = true;
+        for (&src, targets) in &adjacency {
+            if let Some(&src_pos) = position_map.get(&src) {
+                for &dst in targets {
+                    if let Some(&dst_pos) = position_map.get(&dst) {
+                        // If this rule applies (both src and dst in this update),
+                        // then check ordering constraint.
+                        if src_pos >= dst_pos {
+                            // Violation found
+                            is_correct = false;
+                            break;
+                        }
+                    }
                 }
             }
+            if !is_correct {
+                break;
+            }
         }
 
-        // If we get here, no violation was found. This update is already correct.
+        if is_correct {
+            // Update is already correct, do nothing
+            continue 'outer;
+        }
+
+        // If we reach here, the update is incorrect and needs to be fixed.
+        // We'll build a subgraph for just this update and sort it.
+        let corrected_order = fix_update(&update_pages, &adjacency);
+        incorrect_updates.push(corrected_order);
     }
 
-    // Summation logic similar to problem1:
+    // Sum the middle page number of all corrected updates
     let sum = incorrect_updates.iter().fold(0, |acc, x| {
         let sz = x.len();
         let index = (sz - 1) / 2;
         let value = x[index];
-        value + acc
+        acc + value
     });
 
     pretty_print_answer(sum);
+}
+
+/// Build a minimal subgraph from the given adjacency (rules) and run topological sort.
+/// This function returns a corrected ordering of the pages.
+fn fix_update(update_pages: &[u32], adjacency: &HashMap<u32, Vec<u32>>) -> Vec<u32> {
+    // Separate constrained (appear in adjacency) and unconstrained (no rules or not in adjacency)
+    let constrained_nodes: Vec<u32> = update_pages
+        .iter()
+        .filter(|&&p| adjacency.contains_key(&p) || adjacency.values().any(|v| v.contains(&p)))
+        .copied()
+        .collect();
+
+    let unconstrained_nodes: Vec<u32> = update_pages
+        .iter()
+        .filter(|&&p| !constrained_nodes.contains(&p))
+        .copied()
+        .collect();
+
+    // Build a subgraph for just the constrained nodes
+    let mut subgraph = DiGraph::<u32, ()>::new();
+    let mut node_map = HashMap::new();
+
+    // Add nodes
+    for &page in &constrained_nodes {
+        let idx = subgraph.add_node(page);
+        node_map.insert(page, idx);
+    }
+
+    // Add edges
+    for &page in &constrained_nodes {
+        if let Some(targets) = adjacency.get(&page) {
+            for &t in targets {
+                if node_map.contains_key(&t) {
+                    // Both page and t are in this update, so add an edge
+                    let src_idx = node_map[&page];
+                    let dst_idx = node_map[&t];
+                    subgraph.add_edge(src_idx, dst_idx, ());
+                }
+            }
+        }
+    }
+
+    // Topologically sort the subgraph
+    let order = match toposort(&subgraph, None) {
+        Ok(order) => order,
+        Err(_) => {
+            // If there's a cycle here, we can't fix it. For puzzle logic, we assume no such case.
+            // Just return the original line for safety.
+            return update_pages.to_vec();
+        }
+    };
+
+    let mut corrected_constrained: Vec<u32> = order.iter().map(|&i| subgraph[i]).collect();
+
+    // Append unconstrained nodes at the end (or handle differently as per puzzle logic)
+    corrected_constrained.extend(unconstrained_nodes);
+
+    corrected_constrained
 }
 
 fn main() {
