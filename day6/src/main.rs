@@ -1,8 +1,12 @@
+use indicatif::ProgressIterator;
 use shared::*;
 use std::fs;
 use std::ops::{Index, IndexMut};
 use std::process::exit;
 
+const MAX_ITERS: usize = 100000;
+
+#[derive(Clone, Debug)]
 pub struct Grid {
     grid: Vec<Vec<char>>,
     rows: usize,
@@ -10,20 +14,24 @@ pub struct Grid {
     iter: usize,
     guard_distinct_pos: usize,
     guard_pos: (usize, usize),
+    previously_rotated: bool,
 }
 
 impl Grid {
     fn new(grid: Vec<Vec<char>>) -> Self {
         let rows = grid.len();
         let cols = if rows > 0 { grid[0].len() } else { 0 };
-        Grid {
+        let mut grid = Grid {
             grid,
             rows,
             cols,
             iter: 0,
             guard_distinct_pos: 0,
             guard_pos: (0, 0),
-        }
+            previously_rotated: false,
+        };
+        grid.initialize_guard_pos();
+        grid
     }
 
     fn initialize_guard_pos(&mut self) {
@@ -73,7 +81,7 @@ fn direction_vector(direction: char) -> (isize, isize) {
     match direction {
         '^' => (-1, 0),
         '>' => (0, 1),
-        'V' => (1, 0),
+        'v' => (1, 0),
         '<' => (0, -1),
         _ => panic!("Invalid direction character: {}", direction),
     }
@@ -82,14 +90,27 @@ fn direction_vector(direction: char) -> (isize, isize) {
 fn rotate_direction(direction: char) -> char {
     match direction {
         '^' => '>',
-        '>' => 'V',
-        'V' => '<',
+        '>' => 'v',
+        'v' => '<',
         '<' => '^',
         _ => panic!("Invalid direction to rotate: {}", direction),
     }
 }
 
-fn try_move_guard(mat: &mut Grid, direction: char) {
+fn old_position_mark(direction: char, previously_rotated: bool) -> char {
+    if previously_rotated {
+        return '+';
+    }
+    match direction {
+        '^' => '|',
+        '>' => '-',
+        'v' => '|',
+        '<' => '-',
+        _ => panic!("Invalid direction character: {}", direction),
+    }
+}
+
+fn try_move_guard(mat: &mut Grid, direction: char, debug: bool) -> bool {
     let (dr, dc) = direction_vector(direction);
     let old_pos = mat.guard_pos;
 
@@ -99,7 +120,8 @@ fn try_move_guard(mat: &mut Grid, direction: char) {
 
     if new_r < 0 || new_c < 0 {
         // Out of bounds, guard leaves grid
-        end_simulation(mat, old_pos);
+        end_simulation(mat, old_pos, direction, debug);
+        return true;
     }
 
     let new_pos = (new_r as usize, new_c as usize);
@@ -109,50 +131,60 @@ fn try_move_guard(mat: &mut Grid, direction: char) {
         match next_cell {
             '.' => {
                 // Move guard, and new distinct position
-                mat[old_pos] = 'X';
+                mat[old_pos] = old_position_mark(direction, mat.previously_rotated);
                 mat[new_pos] = direction;
                 mat.guard_distinct_pos += 1;
                 mat.guard_pos = new_pos;
+                mat.previously_rotated = false;
             }
-            'X' => {
+            's' | '-' | '|' | '+' => {
                 // Move guard, but previously visited position
-                mat[old_pos] = 'X';
+                mat[old_pos] = old_position_mark(direction, mat.previously_rotated);
                 mat[new_pos] = direction;
                 mat.guard_pos = new_pos;
+                mat.previously_rotated = false;
             }
-            '#' => {
+            '#' | 'O' => {
                 // Rotate direction
-                mat[old_pos] = rotate_direction(direction);
+                let new_direction = rotate_direction(direction);
+                mat[old_pos] = new_direction;
+                mat.previously_rotated = true;
             }
             other => {
                 panic!("Unexpected cell at try_move_guard {}", other);
             }
         }
+        false
     } else {
         // Out of bounds
-        end_simulation(mat, old_pos);
+        end_simulation(mat, old_pos, direction, debug);
+        true
     }
 }
 
-fn end_simulation(mat: &mut Grid, old_pos: (usize, usize)) {
-    mat[old_pos] = 'X';
+fn end_simulation(mat: &mut Grid, old_pos: (usize, usize), direction: char, debug: bool) {
+    mat[old_pos] = old_position_mark(direction, mat.previously_rotated);
     mat.guard_distinct_pos += 1;
     mat.iter += 1;
-    mat.print_grid();
-    exit(0);
+    if debug {
+        mat.print_grid();
+    }
 }
 
-fn update_grid(mat: &mut Grid) {
+fn update_grid(mat: &mut Grid, debug: bool) -> bool {
     let guard_char = mat[mat.guard_pos];
-    match guard_char {
-        '^' => try_move_guard(mat, '^'),
-        '>' => try_move_guard(mat, '>'),
-        'V' => try_move_guard(mat, 'V'),
-        '<' => try_move_guard(mat, '<'),
+    let should_break = match guard_char {
+        '^' => try_move_guard(mat, '^', debug),
+        '>' => try_move_guard(mat, '>', debug),
+        'v' => try_move_guard(mat, 'v', debug),
+        '<' => try_move_guard(mat, '<', debug),
         other => panic!("Unexpected cell at update_grid {}", other),
-    }
+    };
     mat.iter += 1;
-    mat.print_grid();
+    if debug {
+        mat.print_grid();
+    }
+    should_break
 }
 
 fn parse_grid(input: &str) -> Grid {
@@ -160,11 +192,6 @@ fn parse_grid(input: &str) -> Grid {
     if lines.is_empty() {
         panic!("Input is empty, cannot construct a grid.");
     }
-
-    // let line_length = lines[0].len();
-    // if !lines.iter().all(|&line| line.len() == line_length) {
-    //     panic!("Not all lines have equal length.");
-    // }
 
     let grid: Vec<Vec<char>> = lines
         .iter()
@@ -174,13 +201,53 @@ fn parse_grid(input: &str) -> Grid {
     Grid::new(grid)
 }
 
+/// Compute how many iters it takes for "guard" to leave the grid
 fn problem1(input: String, debug: bool) {
     let mut input_grid = parse_grid(&input);
-    input_grid.initialize_guard_pos();
-    input_grid.print_grid();
-    loop {
-        update_grid(&mut input_grid);
+    if debug {
+        input_grid.print_grid();
     }
+    // break after MAX_ITERS at latest, in case we have a never ending cycle
+    while input_grid.iter < MAX_ITERS {
+        let should_break = update_grid(&mut input_grid, debug);
+        if should_break {
+            break;
+        };
+    }
+    pretty_print_answer(input_grid.guard_distinct_pos);
+}
+
+/// Naively add in obstacles and detect which positions create a cycle
+fn problem2(input: String, debug: bool) {
+    let input_grid = parse_grid(&input);
+    let mut obstruction_count = 0;
+    for i in (0..input_grid.rows).progress() {
+        for j in 0..input_grid.cols {
+            let mut obstructed = true;
+            let mut current_grid = input_grid.clone();
+            let cell_at = current_grid[(i, j)];
+            if cell_at != '.' {
+                continue;
+            } else {
+                current_grid[(i, j)] = 'O';
+            }
+            if debug {
+                current_grid.print_grid();
+            }
+            // break after MAX_ITERS at latest, in case we have a never ending cycle
+            'inner: while current_grid.iter < MAX_ITERS {
+                let should_break = update_grid(&mut current_grid, debug);
+                if should_break {
+                    obstructed = false;
+                    break 'inner;
+                };
+            }
+            if obstructed {
+                obstruction_count += 1;
+            }
+        }
+    }
+    pretty_print_answer(obstruction_count);
 }
 
 fn main() {
@@ -189,6 +256,7 @@ fn main() {
 
     match args.problem {
         1 => problem1(input, args.debug),
+        2 => problem2(input, args.debug),
         _ => panic!("Not implemented"),
     }
 }
