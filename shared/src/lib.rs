@@ -10,6 +10,9 @@ pub struct Args {
 
     #[arg(short, long)]
     pub problem: i32,
+
+    #[arg(short, long, action)]
+    pub debug: bool,
 }
 
 impl Args {
